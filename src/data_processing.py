@@ -6,7 +6,7 @@ from astropy.table import Table
 from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected
 
-def load_galaxy_data(galaxy_name, data_dir, phot_cols, ra_dec_cols, source="human", include_class3=True):
+def load_galaxy_data(galaxy_name, data_dir, phot_cols, ra_dec_cols, source="human", include_class3=False):
     phot_path = f"{data_dir}/catalogs/hlsp_phangs-cat_hst_uvis_{galaxy_name.lower().replace('_','')}_multi_v1_obs-{source}-cluster-class12.fits"
     ages_path = f"{data_dir}/catalogs/hlsp_phangs-cat_hst_uvis_{galaxy_name.lower().replace('_','')}_multi_v1_sed-ground-halpha-{source}-cluster-class12.fits"
     

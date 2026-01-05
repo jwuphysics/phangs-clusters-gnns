@@ -31,6 +31,8 @@ ALL_GALAXIES = ["IC_1954", "IC_5332", "NGC_0685", "NGC_1087", "NGC_1097", "NGC_1
 # old
 # ALL_GALAXIES = ["NGC_1433", "NGC_2835", "NGC_1512", "NGC_3351", "NGC_7496", "NGC_5248", "NGC_4535", "NGC_1365", "NGC_5068", "NGC_4321", "NGC_3627", "NGC_4254", "NGC_1566", "IC_5332"]
 
+photometric_source = "human" #  "human" or "machine"
+include_class3 = False 
 
 edge_features = ["separation", "polar_angle"]
 graph_features = ["sin_i", "D"] # skip... "cos_pa"
@@ -68,7 +70,7 @@ def main():
         meta_values = galaxies_meta.loc[galaxy][graph_features].values.astype(float) if graph_features else [] 
         meta_RA_DEC = galaxies_meta.loc[galaxy][["RAJ2000", "DEJ2000"]].values.astype(float)
 
-        df = load_galaxy_data(galaxy, CAT_DIR, PHOT_COLS, RA_DEC_COLS, source="human", include_class3=False)
+        df = load_galaxy_data(galaxy, CAT_DIR, PHOT_COLS, RA_DEC_COLS, source=photometric_source, include_class3=include_class3)
         # df = load_galaxy_data_old(galaxy, "/home/john/research/phangs-star-clusters/data", PHOT_COLS, RA_DEC_COLS) # Turner ages
         if df is not None and not df.empty:
             # approximately convert kpc -> arcsec
