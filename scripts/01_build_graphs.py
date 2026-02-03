@@ -21,7 +21,7 @@ RESULTS_DIR = ROOT / "results"
 PROCESSED_DATA_PATH = DATA_DIR / "processed" / "galaxy_graphs.pkl"
 
 # Removed:
-# No metadata:        NGC_1510
+# No metadata (not even in sample?): NGC_1510 
 # ACS instead of WFC3: NGC_628C, NGC_628E, NGC_1300, NGC_1672, NGC_3621
 # Causes NaNs (if we don't remove NaNs) or too sparse: NGC_1317 NGC_1559
 # 
@@ -78,7 +78,7 @@ def main():
             
             
             graph = create_graph_from_df(df, PHOT_COLS, Y_COLS, origin=meta_RA_DEC, r_link_arcsec=R_LINK_ARCSEC, edge_features=edge_features)
-            graph.u = torch.tensor(meta_values, dtype=torch.float)
+            graph.u = torch.tensor(meta_values, dtype=torch.float).unsqueeze(0)  # Shape: [1, n_graph_features]
             graph.name = galaxy
             data_list.append(graph)
 

@@ -123,6 +123,9 @@ def create_graph_from_df(df, x_cols, y_cols, r_link_arcsec=15, origin=None, epsi
         
     edge_attr = torch.cat(edge_attr, dim=1) if len(edge_attr) > 0 else torch.tensor([])
     center = torch.tensor(origin, dtype=torch.float)
+    
+    # Extract cluster_id if available
+    cluster_id = df["cluster_id"].values if "cluster_id" in df.columns else np.arange(len(df))
         
-    graph_data = Data(x=x, y=y, pos=pos, edge_index=edge_index, edge_attr=edge_attr, center=center)
+    graph_data = Data(x=x, y=y, pos=pos, edge_index=edge_index, edge_attr=edge_attr, center=center, cluster_id=cluster_id)
     return graph_data

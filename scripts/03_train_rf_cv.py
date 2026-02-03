@@ -45,7 +45,17 @@ def main():
         print(f"Fold {i} RF Metrics: {metrics}")
         save_results(RF_RESULTS_DIR / f"cv_rf_fold_{i}_metrics.json", metrics)
 
-        pred_df = pd.DataFrame({'y_pred': p_valid.ravel(), 'y_true': y_valid.ravel(), 'fold': i})
+        # Get cluster IDs and galaxy names for validation set
+        valid_cluster_ids = np.concatenate([data_dict[g].cluster_id for g in valid_galaxies])
+        valid_galaxy_names = np.concatenate([[g] * data_dict[g].x.shape[0] for g in valid_galaxies])
+
+        pred_df = pd.DataFrame({
+            'y_pred': p_valid.ravel(), 
+            'y_true': y_valid.ravel(), 
+            'cluster_id': valid_cluster_ids,
+            'galaxy': valid_galaxy_names,
+            'fold': i
+        })
         all_preds_df.append(pred_df)
         save_results(RF_RESULTS_DIR / f"cv_rf_fold_{i}_predictions.csv", pred_df)
 

@@ -112,7 +112,7 @@ class EdgeInteractionGNN(nn.Module):
     
     def forward(self, data: Data):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch    
-        u = data.u.reshape(1, -1)[batch]
+        u = data.u[batch]
     
         # initial layer(s)
         h = torch.cat([
