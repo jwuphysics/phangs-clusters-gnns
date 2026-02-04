@@ -39,7 +39,7 @@ graph_features = ["sin_i", "D"] # skip... "cos_pa"
 
 
 RA_DEC_COLS = ["PHANGS_RA", "PHANGS_DEC"]
-PHOT_COLS = ["PHANGS_F275W_VEGA", "PHANGS_F336W_VEGA", "PHANGS_F438W_VEGA", "PHANGS_F555W_VEGA", "PHANGS_F814W_VEGA", "PHANGS_CI"] #  
+PHOT_COLS = ["PHANGS_F275W_VEGA", "PHANGS_F336W_VEGA", "PHANGS_F438W_VEGA", "PHANGS_F555W_VEGA", "PHANGS_F814W_VEGA", "PHANGS_CI"] 
 Y_COLS = ["cluster_log_age"]
 
 R_LINK_ARCSEC = 60
@@ -85,7 +85,7 @@ def main():
     data_dict = {name: d for name, d in zip(ALL_GALAXIES, data_list)}
     print("Number of node features: ", graph.x.shape[-1])
     print("Number of edge features: ", graph.edge_attr.shape[-1])
-    print("Number of graph features: ", len(graph.u))
+    print("Number of graph features: ", graph.u.shape[-1])
 
     # Save processed data
     with open(PROCESSED_DATA_PATH, "wb") as f:

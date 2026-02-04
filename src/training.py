@@ -7,7 +7,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from scipy.stats import median_abs_deviation
 from torch_geometric.loader import DataLoader
-from torch_geometric.utils import dropout_node
+from torch_geometric.utils import dropout_node, scatter
 from typing import Tuple
 
 def huber_loss(y_pred: torch.Tensor, y_true: torch.Tensor, delta=1.0) -> torch.Tensor:
@@ -35,56 +35,20 @@ def mse_loss(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     return F.mse_loss(y_pred_masked, y_true_masked, reduction="sum"), finite_mask.sum()
 
 
-def gaussian_huber_nll_loss(y_pred: torch.Tensor, y_true: torch.Tensor, logvar: torch.Tensor, delta=1.0) -> torch.Tensor:
-    """Compute Gaussian-like negative log-likelihood loss with Huber (L1) for .
-
-    Note that we send along the num_samples because if we average the loss too early, it weights each 
-    graph equally (which we don't want to do). This way we weight each node equally.
-    
-    Args:
-        y_pred: Model predictions
-        y_true: Ground truth values  
-        logvar: Log variance prediction (averaged)
-        
-    Returns:
-        Gaussian NLL loss
-    """
-    finite_mask = (y_true > 0.) & (y_true.isfinite())
-    
-    if not finite_mask.any():
-        return torch.tensor(0.0, device=y_pred.device, requires_grad=True)
-
-    y_pred_masked = y_pred[finite_mask]
-    y_true_masked = y_true[finite_mask]
-    loss, num_samples = huber_loss(y_pred, y_true, delta=delta)
-    
-    return (loss / 10**logvar + 0.5 * logvar * num_samples), num_samples
-    
-
 def gaussian_nll_loss(y_pred: torch.Tensor, y_true: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    """Compute Gaussian negative log-likelihood loss while masking out infinite values.
-
-    Note that we send along the num_samples because if we average the loss too early, it weights each 
-    graph equally (which we don't want to do). This way we weight each node equally.
-    
-    Args:
-        y_pred: Model predictions
-        y_true: Ground truth values  
-        logvar: Log variance prediction 
-        
-    Returns:
-        Gaussian NLL loss
-    """
+    """Compute Gaussian NLL with per-node logvar (already averaged per-galaxy)."""
     finite_mask = (y_true > 0.) & (y_true.isfinite())
     
     if not finite_mask.any():
-        return torch.tensor(0.0, device=y_pred.device, requires_grad=True)
+        return torch.tensor(0.0, device=y_pred.device, requires_grad=True), 0
 
-    y_pred_masked = y_pred[finite_mask]
-    y_true_masked = y_true[finite_mask]
-    loss, num_samples = mse_loss(y_pred, y_true)
+    y_pred = y_pred[finite_mask]
+    y_true = y_true[finite_mask]
+    logvar = logvar[finite_mask]
     
-    return (loss / 10**logvar + 0.5 * logvar * num_samples), num_samples
+    nll = 0.5 * ((y_pred - y_true)**2 / (10**logvar) + logvar)
+    
+    return nll.sum(), finite_mask.sum()
     
 
 def compute_rmse(preds, targs):
@@ -181,15 +145,15 @@ def train_gnn_epoch(
         
         optimizer.zero_grad()
         output = model(data)
-
         y_pred, logvar_pred = output.chunk(2, dim=1)
         
         assert not torch.isnan(y_pred).any() and not torch.isnan(logvar_pred).any()
         
-        y_pred = y_pred.view(-1, data.y.shape[1] if len(data.y.shape) > 1 else 2)
-        logvar_pred = logvar_pred.mean()
+        # Average logvar per-galaxy, then broadcast back to nodes
+        logvar_per_graph = scatter(logvar_pred, data.batch, dim=0, reduce='mean')
+        logvar_per_node = logvar_per_graph[data.batch]
 
-        loss, num_samp = gaussian_nll_loss(y_pred, data.y, logvar_pred)
+        loss, num_samp = gaussian_nll_loss(y_pred, data.y, logvar_per_node)
         loss.backward()
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
@@ -231,10 +195,10 @@ def validate_gnn_epoch(
         
             assert not torch.isnan(y_pred).any() and not torch.isnan(logvar_pred).any()
             
-            y_pred = y_pred.view(-1, data.y.shape[1] if len(data.y.shape) > 1 else 2)
-            logvar_pred = logvar_pred.mean()
+            logvar_per_graph = scatter(logvar_pred, data.batch, dim=0, reduce='mean')
+            logvar_per_node = logvar_per_graph[data.batch]
     
-            loss, num_samp = gaussian_nll_loss(y_pred, data.y, logvar_pred)
+            loss, num_samp = gaussian_nll_loss(y_pred, data.y, logvar_per_node)
 
             loss_total += loss.item()
             num_samples += num_samp.item()
@@ -246,6 +210,91 @@ def validate_gnn_epoch(
     y_trues = np.concatenate(y_trues, axis=0)
     
     return loss_total / num_samples, y_preds, y_trues
+
+
+def validate_gnn_epoch_with_ids(
+    dataloader: DataLoader,
+    model: nn.Module,
+    device: str
+) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Validate GNN model and extract cluster IDs and galaxy names.
+    
+    This function performs validation and also extracts the cluster_id and 
+    galaxy name attributes from each graph, properly handling PyG's batching
+    of custom attributes.
+    
+    Args:
+        dataloader: Validation data loader
+        model: Model to validate
+        device: Device to validate on
+        
+    Returns:
+        Tuple of (loss, predictions, targets, cluster_ids, galaxy_names)
+    """
+    import torch
+    
+    model.eval()
+    loss_total = 0
+    num_samples = 0
+    y_preds = []
+    y_trues = []
+    all_cluster_ids = []
+    all_galaxy_names = []
+    
+    for data in dataloader:
+        with torch.no_grad():
+            data.to(device)
+            
+            output = model(data)
+            y_pred, logvar_pred = output.chunk(2, dim=1)
+        
+            assert not torch.isnan(y_pred).any() and not torch.isnan(logvar_pred).any()
+            
+            logvar_per_graph = scatter(logvar_pred, data.batch, dim=0, reduce='mean')
+            logvar_per_node = logvar_per_graph[data.batch]
+    
+            loss, num_samp = gaussian_nll_loss(y_pred, data.y, logvar_per_node)
+            loss_total += loss.item()
+            num_samples += num_samp.item()
+            
+            y_preds.append(y_pred.detach().cpu().numpy())
+            y_trues.append(data.y.detach().cpu().numpy())
+            
+            # Extract cluster IDs
+            # PyG batches custom numpy/list attributes as lists of the original arrays
+            if hasattr(data, 'cluster_id'):
+                if isinstance(data.cluster_id, list):
+                    try:
+                        batch_cluster_ids = np.concatenate([
+                            c.cpu().numpy() if torch.is_tensor(c) else np.asarray(c)
+                            for c in data.cluster_id
+                        ])
+                    except (ValueError, AttributeError):
+                        batch_cluster_ids = np.concatenate(data.cluster_id)
+                else:
+                    batch_cluster_ids = data.cluster_id
+                    if torch.is_tensor(batch_cluster_ids):
+                        batch_cluster_ids = batch_cluster_ids.cpu().numpy()
+                
+                batch_cluster_ids = np.array(batch_cluster_ids).flatten()
+                all_cluster_ids.append(batch_cluster_ids)
+            
+            # Extract galaxy names
+            # data.name is typically a list of galaxy name strings (one per graph in batch)
+            # We need to repeat each name for the number of nodes in that graph
+            if hasattr(data, 'name') and isinstance(data.name, list):
+                batch_galaxy_names = []
+                for i, name in enumerate(data.name):
+                    n_nodes = (data.batch == i).sum().item()
+                    batch_galaxy_names.extend([name] * n_nodes)
+                all_galaxy_names.append(np.array(batch_galaxy_names))
+            
+    y_preds = np.concatenate(y_preds, axis=0)
+    y_trues = np.concatenate(y_trues, axis=0)
+    cluster_ids = np.concatenate(all_cluster_ids) if all_cluster_ids else np.array([])
+    galaxy_names = np.concatenate(all_galaxy_names) if all_galaxy_names else np.array([])
+    
+    return loss_total / num_samples, y_preds, y_trues, cluster_ids, galaxy_names
 
 
 # def train_gnn_subgraph_epoch(

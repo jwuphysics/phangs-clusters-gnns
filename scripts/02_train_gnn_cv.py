@@ -1,3 +1,9 @@
+"""
+GNN Cross-Validation Training Script
+
+This script trains a GNN model using cross-validation, saves models and predictions.
+It also provides a function to generate predictions from saved models without retraining.
+"""
 import pickle
 from pathlib import Path
 import sys
@@ -7,20 +13,22 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from torch_geometric.loader import DataLoader
-from torch.optim.lr_scheduler import OneCycleLR
-
+import json
 from muon import SingleDeviceMuonWithAuxAdam
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
-from src.model import *
-from src.training import train_gnn_epoch, validate_gnn_epoch, calculate_metrics, save_results, compute_rmse
-from src.cross_validation import create_stratified_k_folds_by_distance, create_random_k_folds, save_cv_splits, load_cv_splits
+from src.model import EdgeInteractionGNN
+from src.training import (
+    train_gnn_epoch, validate_gnn_epoch, validate_gnn_epoch_with_ids,
+    calculate_metrics, save_results, compute_rmse
+)
+from src.cross_validation import create_random_k_folds, save_cv_splits, load_cv_splits
 
 # Configuration
 DATA_DIR = ROOT / "data"
-RESULTS_DIR = ROOT / "results"
+RESULTS_DIR = ROOT / "results-updated"
 PROCESSED_DATA_PATH = DATA_DIR / "processed" / "galaxy_graphs.pkl"
 CV_SPLIT_PATH = RESULTS_DIR / "cv_galaxy_splits.json"
 GNN_RESULTS_DIR = RESULTS_DIR / "gnn"
@@ -35,12 +43,7 @@ GNN_CONFIG = {
     'lr': 1e-2, 
     'wd': 0, 
     'n_epochs': 150, 
-    'batch_size': 8,
-    # 'lr_step_down': [0.5, 0.85, 0.95],
-    # 'lr_div_factor': 5,
-    # '1cycle_pct_start': 0.2,
-    # '1cycle_div_factor': 10,
-    # '1cycle_final_div_factor': 1000,
+    'batch_size': 1,
     'muon_lr': 1e-2,
     'muon_wd': 1e-6,
     'n_layers': 1, 
@@ -49,19 +52,99 @@ GNN_CONFIG = {
     'n_unshared_layers': 16,
 }
 
-def main():
+
+def generate_predictions_from_saved_models():
+    """Generate predictions using saved GNN models without retraining.
+    
+    This function loads the saved model weights from each CV fold and generates
+    predictions for the validation set, including cluster IDs and galaxy names.
+    """
+    if not PROCESSED_DATA_PATH.exists():
+        print(f"Error: {PROCESSED_DATA_PATH} not found. Run 01_build_graphs.py first.")
+        return
+    
+    if not CV_SPLIT_PATH.exists():
+        print(f"Error: {CV_SPLIT_PATH} not found. Run training first.")
+        return
+
+    with open(PROCESSED_DATA_PATH, "rb") as f:
+        data_dict = pickle.load(f)
+
+    cv_splits = load_cv_splits(CV_SPLIT_PATH)
+    
+    all_preds_df = []
+    
+    for i, fold in enumerate(tqdm(cv_splits, desc="Generating predictions from saved models")):
+        train_galaxies, valid_galaxies = fold['train'], fold['valid']
+        valid_data = [data_dict[g] for g in valid_galaxies]
+        valid_loader = DataLoader(valid_data, shuffle=False, batch_size=1)
+
+        # Get feature dimensions from data
+        n_node_features = valid_data[0].x.shape[-1]
+        n_edge_features = valid_data[0].edge_attr.shape[-1] if hasattr(valid_data[0], "edge_attr") else 0
+        n_graph_features = valid_data[0].u.shape[-1] if hasattr(valid_data[0], "u") else 0
+
+        model = EdgeInteractionGNN(
+            n_layers=GNN_CONFIG['n_layers'], 
+            hidden_channels=GNN_CONFIG['hidden_channels'],
+            latent_channels=GNN_CONFIG['latent_channels'], 
+            n_unshared_layers=GNN_CONFIG['n_unshared_layers'],
+            node_features=n_node_features,
+            edge_features=n_edge_features,
+            graph_features=n_graph_features,
+        ).to(DEVICE)
+        
+        model_path = GNN_RESULTS_DIR / f"cv_gnn_fold_{i}_model.pth"
+        if not model_path.exists():
+            print(f"Warning: Model fold {i} not found at {model_path}, skipping.")
+            continue
+            
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE, weights_only=True))
+        
+        _, p_valid, y_valid, ids_valid, names_valid = validate_gnn_epoch_with_ids(
+            valid_loader, model, DEVICE
+        )
+        
+        pred_df = pd.DataFrame({
+            'y_pred': p_valid.ravel(), 
+            'y_true': y_valid.ravel(), 
+            'cluster_id': ids_valid,
+            'galaxy': names_valid,
+            'fold': i
+        })
+        all_preds_df.append(pred_df)
+        pred_df.to_csv(GNN_RESULTS_DIR / f"cv_gnn_fold_{i}_predictions.csv", index=False)
+        
+    if all_preds_df:
+        final_df = pd.concat(all_preds_df, ignore_index=True)
+        final_df.to_csv(GNN_RESULTS_DIR / "predictions.csv", index=False)
+        print(f"Predictions saved to {GNN_RESULTS_DIR / 'predictions.csv'}")
+        
+        # Aggregate and plot final results
+        all_metrics = []
+        for i, fold in enumerate(tqdm(cv_splits, desc="Aggregating results")):
+            metrics = json.load(open(GNN_RESULTS_DIR / f"cv_gnn_fold_{i}_metrics.json", "r"))
+            all_metrics.append(metrics) 
+    
+        final_metrics_df = pd.DataFrame(all_metrics)
+        aggregated_metrics = final_metrics_df.agg(['mean', 'std'])
+        print("\n--- Aggregated GNN CV Metrics (mean +/- std) ---")
+        for metric in aggregated_metrics.columns:
+            mean, std = aggregated_metrics.loc['mean', metric], aggregated_metrics.loc['std', metric]
+            print(f"  {metric:<15}: {mean:.4f} +/- {std:.4f}")
+        
+    else:
+        print("No predictions generated. Check if models exist.")
+
+
+def train_cv():
+    """Train GNN with cross-validation and save models and predictions."""
     
     with open(PROCESSED_DATA_PATH, "rb") as f:
         data_dict = pickle.load(f)
 
     galaxy_names = list(data_dict.keys())
-    # galaxy_distances = pd.Series({name: data.u[0].item() for name, data in data_dict.items()}, name="D")
 
-    # cv_splits = create_stratified_k_folds_by_distance(
-    #     pd.DataFrame(index=galaxy_names).join(galaxy_distances), 
-    #     k=K_FOLDS, 
-    #     seed=SEED
-    # )
     cv_splits = create_random_k_folds(
         pd.DataFrame(index=galaxy_names),
         k=K_FOLDS,
@@ -78,8 +161,8 @@ def main():
         train_data = [data_dict[g] for g in train_galaxies]
         valid_data = [data_dict[g] for g in valid_galaxies]
 
-        train_loader = DataLoader(train_data, shuffle=True)
-        valid_loader = DataLoader(valid_data, shuffle=False)
+        train_loader = DataLoader(train_data, shuffle=True, batch_size=GNN_CONFIG['batch_size'])
+        valid_loader = DataLoader(valid_data, shuffle=False, batch_size=GNN_CONFIG['batch_size'])
 
         n_node_features = train_data[0].x.shape[-1]
         n_edge_features = train_data[0].edge_attr.shape[-1] if hasattr(train_data[0], "edge_attr") else 0
@@ -95,8 +178,6 @@ def main():
             graph_features=n_graph_features,
         ).to(DEVICE)
 
-        # optimizer = torch.optim.AdamW(model.parameters(), lr=GNN_CONFIG['lr'], weight_decay=GNN_CONFIG['wd'])
-
         hidden_weights = [p for p in model.parameters() if p.ndim >= 2]
         hidden_gains_biases = [p for p in model.parameters() if p.ndim < 2]
         param_groups = [
@@ -110,13 +191,8 @@ def main():
         epoch_pbar = tqdm(range(GNN_CONFIG['n_epochs']), desc=f"Fold {i} Training", leave=False)
         
         for epoch in epoch_pbar:
-            # if epoch in [int(frac * GNN_CONFIG['n_epochs']) for frac in GNN_CONFIG['lr_step_down']]:
-            #     optimizer.param_groups[0]['lr'] /= GNN_CONFIG['lr_div_factor']
-            
             train_loss = train_gnn_epoch(train_loader, model, optimizer, DEVICE)
             valid_loss, p, y = validate_gnn_epoch(valid_loader, model, DEVICE)
-
-            # scheduler.step()
 
             valid_rmse = compute_rmse(p.flatten(), y.flatten())
             
@@ -162,6 +238,8 @@ def main():
         
     # Aggregate and plot final results
     final_df = pd.concat(all_preds_df)
+    final_df.to_csv(GNN_RESULTS_DIR / "predictions.csv", index=False)
+    
     final_metrics_df = pd.DataFrame(all_metrics)
     aggregated_metrics = final_metrics_df.agg(['mean', 'std'])
     print("\n--- Aggregated GNN CV Metrics (mean +/- std) ---")
@@ -182,6 +260,13 @@ def main():
     plt.title(f"EdgeInteractionGNN (5-fold CV)\nRMSE={mean_rmse:.4f} dex, NMAD={mean_nmad:.4f} dex")
     plt.savefig(GNN_RESULTS_DIR / "cv_gnn_final_plot.png", bbox_inches='tight')
     plt.close()
+
+
+def main():
+    """Main entry point: train models and generate predictions."""
+    train_cv()
+    # generate_predictions_from_saved_models()
+
 
 if __name__ == "__main__":
     main()
