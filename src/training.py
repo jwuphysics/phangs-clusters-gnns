@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from scipy.stats import median_abs_deviation
+from sklearn.metrics import median_absolute_error
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import dropout_node, scatter
 from typing import Tuple
@@ -517,7 +517,7 @@ def calculate_metrics(y_pred, y_true):
     mae = np.mean(np.abs(residuals))
     bias = np.mean(residuals)
 
-    nmad = median_abs_deviation(residuals, scale='normal')
+    nmad = 1.4826 * median_absolute_error(y_true_clean, y_pred_clean)
 
     outlier_frac = np.mean(np.abs(residuals) > 3 * nmad) if nmad > 0 else 0.0
 
@@ -526,6 +526,107 @@ def calculate_metrics(y_pred, y_true):
         'bias': bias, 'outlier_frac': outlier_frac
     }
     return metrics
+
+
+def calculate_metrics_from_df(df: pd.DataFrame) -> dict:
+    """Calculate metrics from a DataFrame with y_pred and y_true columns."""
+    return calculate_metrics(df['y_pred'].values, df['y_true'].values)
+
+
+def block_bootstrap_metrics(
+    df: pd.DataFrame,
+    block_col: str = 'galaxy',
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+    metrics_fn: callable = None
+) -> dict:
+    """Compute metrics with uncertainties via block-bootstrap resampling.
+    
+    Block-bootstrap resamples at the level of 'blocks' (e.g., galaxies) rather
+    than individual samples. This preserves the correlation structure within
+    blocks and provides more accurate uncertainty estimates when samples within
+    blocks are not independent.
+    
+    Args:
+        df: DataFrame containing 'y_pred', 'y_true', and block_col columns.
+            NaN values in y_true are handled automatically.
+        block_col: Column name identifying the block (default: 'galaxy')
+        n_bootstrap: Number of bootstrap iterations (default: 1000)
+        seed: Random seed for reproducibility
+        metrics_fn: Function to compute metrics from a DataFrame. If None,
+            uses calculate_metrics_from_df which computes rmse, nmad, mae, bias.
+    
+    Returns:
+        Dictionary with metric names as keys. Each metric has:
+            - 'value': point estimate from the full dataset
+            - 'std': standard deviation from bootstrap distribution
+            - 'ci_low': 2.5th percentile (lower 95% CI bound)
+            - 'ci_high': 97.5th percentile (upper 95% CI bound)
+    """
+    if metrics_fn is None:
+        metrics_fn = calculate_metrics_from_df
+    
+    rng = np.random.default_rng(seed)
+    
+    # Get unique blocks
+    blocks = df[block_col].unique()
+    n_blocks = len(blocks)
+    
+    # Compute point estimates from full dataset
+    point_estimates = metrics_fn(df)
+    
+    # Bootstrap loop
+    bootstrap_metrics = {key: [] for key in point_estimates.keys()}
+    
+    for _ in range(n_bootstrap):
+        # Resample blocks with replacement
+        sampled_blocks = rng.choice(blocks, size=n_blocks, replace=True)
+        
+        # Build resampled DataFrame by concatenating all rows from sampled blocks
+        resampled_dfs = [df[df[block_col] == block] for block in sampled_blocks]
+        resampled_df = pd.concat(resampled_dfs, ignore_index=True)
+        
+        # Compute metrics on resampled data
+        metrics = metrics_fn(resampled_df)
+        for key, value in metrics.items():
+            bootstrap_metrics[key].append(value)
+    
+    # Compute summary statistics
+    results = {}
+    for key, values in bootstrap_metrics.items():
+        values = np.array(values)
+        results[key] = {
+            'value': point_estimates[key],
+            'std': np.std(values),
+            'ci_low': np.percentile(values, 2.5),
+            'ci_high': np.percentile(values, 97.5),
+        }
+    
+    return results
+
+
+def format_bootstrap_results(results: dict, metrics: list = None) -> str:
+    """Format bootstrap results as a human-readable string.
+    
+    Args:
+        results: Dictionary from block_bootstrap_metrics
+        metrics: List of metric names to include. If None, includes all.
+    
+    Returns:
+        Formatted string with metrics and uncertainties
+    """
+    if metrics is None:
+        metrics = list(results.keys())
+    
+    lines = []
+    for metric in metrics:
+        if metric in results:
+            r = results[metric]
+            lines.append(
+                f"  {metric:<15}: {r['value']:.4f} ± {r['std']:.4f} "
+                f"(95% CI: [{r['ci_low']:.4f}, {r['ci_high']:.4f}])"
+            )
+    return "\n".join(lines)
 
 
 def save_results(path, data):
