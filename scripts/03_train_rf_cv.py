@@ -60,6 +60,8 @@ def main():
         save_results(RF_RESULTS_DIR / f"cv_rf_fold_{i}_predictions.csv", pred_df)
 
     final_df = pd.concat(all_preds_df)
+    final_df.to_csv(RF_RESULTS_DIR / "predictions.csv", index=False)
+    
     final_metrics_df = pd.DataFrame(all_metrics)
     aggregated_metrics = final_metrics_df.agg(['mean', 'std'])
     print("\n--- Aggregated Random Forest CV Metrics (mean +/- std) ---")
