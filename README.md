@@ -54,6 +54,7 @@ This project requires Python 3.10+ and PyTorch with CUDA support. The core depen
   - `torch-geometric==2.5.0` (with `pyg-lib`, `torch-scatter`, `torch-sparse`, `torch-cluster`)
   - `numpy`, `scipy`, `pandas`, `astropy`, `scikit-learn`, `matplotlib`, `tqdm`
   - `muon-optimizer` (I used `muon-optimizer==0.1.0`)
+  - (Optional) `easyquery` and `astrocut` for generating some of the figures
   - (Optional) `wandb` for experiment tracking
 
 Pytorch-geometric is notoriously difficult in terms of wrangling dependencies, but you can install the version that I've tested via:
